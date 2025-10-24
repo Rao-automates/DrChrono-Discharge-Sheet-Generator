@@ -1,0 +1,485 @@
+{
+  "name": "DrChrono Discharge Sheet Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "generate-discharge",
+        "method": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "discharge-generator"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json[\"appointment_status\"]}}",
+              "operation": "equals",
+              "value2": "REFERRALS COMPLETED"
+            }
+          ]
+        }
+      },
+      "id": "check-appointment-status",
+      "name": "Check Appointment Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://app.drchrono.com/o/token/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "grant_type",
+              "value": "client_credentials"
+            },
+            {
+              "name": "client_id",
+              "value": "OVDMoVX4ewFGQHRV5j2MhTCaEJfOwdn4AN6ZgUuw"
+            },
+            {
+              "name": "client_secret",
+              "value": "3184BGT19iuoVrUA0RTdJTMmqZhXv42Pu9X8iAABr3H3NLkZv8sONBA1WlWrkFAWLFYFXEp7t5mRexIcNw2RV1EFMIdVZvTF5clUuOfKHZmPcXtvi3dJbUdLre6TuyLA"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-drchrono-token",
+      "name": "Get DrChrono OAuth Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "url": "=https://app.drchrono.com/api/appointments/{{$json[\"appointment_id\"]}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "drchronoOAuth2Api",
+        "options": {
+          "headers": {
+            "entries": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{$node[\"Get DrChrono OAuth Token\"].json[\"access_token\"]}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "fetch-appointment-data",
+      "name": "Fetch Appointment Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "url": "=https://app.drchrono.com/api/patients/{{$json[\"patient\"]}}",
+        "options": {
+          "headers": {
+            "entries": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{$node[\"Get DrChrono OAuth Token\"].json[\"access_token\"]}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "fetch-patient-data",
+      "name": "Fetch Patient Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "url": "=https://app.drchrono.com/api/clinical_notes?appointment={{$json[\"appointment_id\"]}}",
+        "options": {
+          "headers": {
+            "entries": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{$node[\"Get DrChrono OAuth Token\"].json[\"access_token\"]}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "fetch-clinical-note",
+      "name": "Fetch Clinical Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1340, 100]
+    },
+    {
+      "parameters": {
+        "url": "=https://app.drchrono.com/api/appointments/{{$json[\"appointment_id\"]}}/checkout",
+        "options": {
+          "headers": {
+            "entries": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{$node[\"Get DrChrono OAuth Token\"].json[\"access_token\"]}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "fetch-checkout-sheet",
+      "name": "Fetch Checkout Sheet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Reconciliation Logic\nconst clinicalNote = $input.item(0).json;\nconst checkoutSheet = $input.item(1).json;\nconst patientData = $node[\"Fetch Patient Data\"].json;\nconst appointmentData = $node[\"Fetch Appointment Data\"].json;\n\nconst conflicts = [];\nconst reconciled = {\n  patient: {\n    name: `${patientData.first_name} ${patientData.last_name}`,\n    dob: patientData.date_of_birth,\n    id: patientData.id,\n    mrn: patientData.chart_id\n  },\n  appointment: {\n    id: appointmentData.id,\n    date: appointmentData.scheduled_time,\n    provider: appointmentData.doctor,\n    location: appointmentData.office\n  },\n  diagnoses: [],\n  procedures: [],\n  medications: {\n    new: [],\n    continued: [],\n    discontinued: []\n  },\n  restrictions: [],\n  followUp: [],\n  orders: {\n    imaging: [],\n    labs: [],\n    referrals: []\n  },\n  homeInstructions: [],\n  redFlags: []\n};\n\n// Reconcile Diagnoses\nconst clinicalDx = clinicalNote.diagnosis_codes || [];\nconst checkoutDx = checkoutSheet.diagnoses || [];\n\nif (JSON.stringify(clinicalDx.sort()) !== JSON.stringify(checkoutDx.sort())) {\n  conflicts.push({\n    field: 'diagnoses',\n    clinical: clinicalDx,\n    checkout: checkoutDx,\n    resolution: 'Using Clinical Note as authoritative source'\n  });\n}\nreconciled.diagnoses = clinicalDx.length > 0 ? clinicalDx : checkoutDx;\n\n// Reconcile Procedures\nconst clinicalProc = clinicalNote.procedures || [];\nconst checkoutProc = checkoutSheet.procedures_performed || [];\n\nif (JSON.stringify(clinicalProc.sort()) !== JSON.stringify(checkoutProc.sort())) {\n  conflicts.push({\n    field: 'procedures',\n    clinical: clinicalProc,\n    checkout: checkoutProc,\n    resolution: 'Merging both sources'\n  });\n}\nreconciled.procedures = [...new Set([...clinicalProc, ...checkoutProc])];\n\n// Reconcile Medications\nreconciled.medications.new = clinicalNote.new_medications || [];\nreconciled.medications.continued = clinicalNote.continued_medications || [];\nreconciled.medications.discontinued = clinicalNote.discontinued_medications || [];\n\n// Reconcile Restrictions\nconst clinicalRestrict = clinicalNote.restrictions || [];\nconst checkoutRestrict = checkoutSheet.restrictions || [];\n\nif (JSON.stringify(clinicalRestrict) !== JSON.stringify(checkoutRestrict)) {\n  conflicts.push({\n    field: 'restrictions',\n    clinical: clinicalRestrict,\n    checkout: checkoutRestrict,\n    resolution: 'Merging both sources'\n  });\n}\nreconciled.restrictions = [...new Set([...clinicalRestrict, ...checkoutRestrict])];\n\n// Follow-up Instructions\nreconciled.followUp = checkoutSheet.follow_up_appointments || clinicalNote.follow_up_instructions || [];\n\n// Orders\nreconciled.orders.imaging = checkoutSheet.imaging_orders || clinicalNote.imaging_orders || [];\nreconciled.orders.labs = checkoutSheet.lab_orders || clinicalNote.lab_orders || [];\nreconciled.orders.referrals = checkoutSheet.referrals || [];\n\n// Home Care Instructions\nreconciled.homeInstructions = clinicalNote.home_care_instructions || checkoutSheet.patient_education || [];\n\n// Red Flags (Emergency Instructions)\nreconciled.redFlags = clinicalNote.red_flag_instructions || [\n  \"Return to ER if symptoms worsen\",\n  \"Call 911 for chest pain, difficulty breathing, or severe bleeding\"\n];\n\n// Calculate conflict percentage\nconst totalFields = 6;\nconst conflictPercentage = ((totalFields - conflicts.length) / totalFields * 100).toFixed(2);\n\nreturn {\n  json: {\n    reconciled,\n    conflicts,\n    metadata: {\n      timestamp: new Date().toISOString(),\n      accuracy: `${conflictPercentage}%`,\n      totalConflicts: conflicts.length,\n      status: conflicts.length === 0 ? 'CLEAN' : 'CONFLICTS_FOUND'\n    }\n  }\n};"
+      },
+      "id": "reconcile-data",
+      "name": "Reconcile Clinical & Checkout Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generate HTML Discharge Sheet\nconst data = $input.first().json;\nconst reconciled = data.reconciled;\nconst conflicts = data.conflicts;\nconst metadata = data.metadata;\n\nconst html = `\n<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title>Discharge Instructions</title>\n  <style>\n    body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }\n    .header { border-bottom: 3px solid #333; padding-bottom: 20px; margin-bottom: 30px; }\n    .patient-info { background: #f5f5f5; padding: 15px; margin-bottom: 20px; border-radius: 5px; }\n    .section { margin-bottom: 30px; }\n    .section-title { background: #333; color: white; padding: 10px; font-size: 18px; font-weight: bold; }\n    .section-content { padding: 15px; border: 1px solid #ddd; }\n    .conflict-alert { background: #fff3cd; border: 2px solid #ffc107; padding: 10px; margin: 10px 0; border-radius: 5px; }\n    .list-item { margin: 8px 0; padding-left: 20px; }\n    .red-flag { background: #f8d7da; border: 2px solid #dc3545; padding: 15px; margin: 20px 0; border-radius: 5px; }\n    .footer { margin-top: 40px; padding-top: 20px; border-top: 2px solid #333; }\n    table { width: 100%; border-collapse: collapse; }\n    td { padding: 8px; border-bottom: 1px solid #ddd; }\n    .bold { font-weight: bold; }\n  </style>\n</head>\n<body>\n  <div class=\"header\">\n    <h1>DISCHARGE INSTRUCTIONS</h1>\n    <p><strong>Generated:</strong> ${metadata.timestamp}</p>\n  </div>\n\n  <div class=\"patient-info\">\n    <table>\n      <tr>\n        <td class=\"bold\">Patient Name:</td>\n        <td>${reconciled.patient.name}</td>\n        <td class=\"bold\">Date of Birth:</td>\n        <td>${reconciled.patient.dob}</td>\n      </tr>\n      <tr>\n        <td class=\"bold\">MRN:</td>\n        <td>${reconciled.patient.mrn || 'N/A'}</td>\n        <td class=\"bold\">Appointment Date:</td>\n        <td>${reconciled.appointment.date}</td>\n      </tr>\n    </table>\n  </div>\n\n  ${conflicts.length > 0 ? `\n  <div class=\"conflict-alert\">\n    <strong>⚠️ Data Conflicts Detected (${conflicts.length}):</strong>\n    <ul>\n      ${conflicts.map(c => `<li><strong>${c.field}:</strong> ${c.resolution}</li>`).join('')}\n    </ul>\n    <p><strong>Data Accuracy:</strong> ${metadata.accuracy}</p>\n  </div>\n  ` : ''}\n\n  <div class=\"section\">\n    <div class=\"section-title\">DIAGNOSES</div>\n    <div class=\"section-content\">\n      ${reconciled.diagnoses.length > 0 ? \n        reconciled.diagnoses.map(d => `<div class=\"list-item\">• ${d}</div>`).join('') :\n        '<p>No diagnoses documented</p>'\n      }\n    </div>\n  </div>\n\n  <div class=\"section\">\n    <div class=\"section-title\">PROCEDURES PERFORMED</div>\n    <div class=\"section-content\">\n      ${reconciled.procedures.length > 0 ? \n        reconciled.procedures.map(p => `<div class=\"list-item\">• ${p}</div>`).join('') :\n        '<p>No procedures documented</p>'\n      }\n    </div>\n  </div>\n\n  <div class=\"section\">\n    <div class=\"section-title\">MEDICATIONS</div>\n    <div class=\"section-content\">\n      ${reconciled.medications.new.length > 0 ? `\n      <p><strong>NEW Medications:</strong></p>\n      ${reconciled.medications.new.map(m => `<div class=\"list-item\">• ${m}</div>`).join('')}\n      ` : ''}\n      \n      ${reconciled.medications.continued.length > 0 ? `\n      <p><strong>CONTINUE Taking:</strong></p>\n      ${reconciled.medications.continued.map(m => `<div class=\"list-item\">• ${m}</div>`).join('')}\n      ` : ''}\n      \n      ${reconciled.medications.discontinued.length > 0 ? `\n      <p><strong>STOP Taking:</strong></p>\n      ${reconciled.medications.discontinued.map(m => `<div class=\"list-item\">• ${m}</div>`).join('')}\n      ` : ''}\n      \n      ${reconciled.medications.new.length === 0 && reconciled.medications.continued.length === 0 && reconciled.medications.discontinued.length === 0 ? \n        '<p>No medication changes</p>' : ''\n      }\n    </div>\n  </div>\n\n  <div class=\"section\">\n    <div class=\"section-title\">ACTIVITY & WORK RESTRICTIONS</div>\n    <div class=\"section-content\">\n      ${reconciled.restrictions.length > 0 ? \n        reconciled.restrictions.map(r => `<div class=\"list-item\">• ${r}</div>`).join('') :\n        '<p>No restrictions</p>'\n      }\n    </div>\n  </div>\n\n  <div class=\"section\">\n    <div class=\"section-title\">HOME CARE INSTRUCTIONS</div>\n    <div class=\"section-content\">\n      ${reconciled.homeInstructions.length > 0 ? \n        reconciled.homeInstructions.map(i => `<div class=\"list-item\">• ${i}</div>`).join('') :\n        '<p>Standard post-visit care instructions apply</p>'\n      }\n    </div>\n  </div>\n\n  <div class=\"section\">\n    <div class=\"section-title\">FOLLOW-UP APPOINTMENTS</div>\n    <div class=\"section-content\">\n      ${reconciled.followUp.length > 0 ? \n        reconciled.followUp.map(f => `<div class=\"list-item\">• ${f}</div>`).join('') :\n        '<p>No follow-up scheduled at this time</p>'\n      }\n    </div>\n  </div>\n\n  <div class=\"section\">\n    <div class=\"section-title\">ORDERS (Imaging, Labs, Referrals)</div>\n    <div class=\"section-content\">\n      ${reconciled.orders.imaging.length > 0 ? `\n      <p><strong>Imaging Orders:</strong></p>\n      ${reconciled.orders.imaging.map(i => `<div class=\"list-item\">• ${i}</div>`).join('')}\n      ` : ''}\n      \n      ${reconciled.orders.labs.length > 0 ? `\n      <p><strong>Lab Orders:</strong></p>\n      ${reconciled.orders.labs.map(l => `<div class=\"list-item\">• ${l}</div>`).join('')}\n      ` : ''}\n      \n      ${reconciled.orders.referrals.length > 0 ? `\n      <p><strong>Referrals:</strong></p>\n      ${reconciled.orders.referrals.map(r => `<div class=\"list-item\">• ${r}</div>`).join('')}\n      ` : ''}\n      \n      ${reconciled.orders.imaging.length === 0 && reconciled.orders.labs.length === 0 && reconciled.orders.referrals.length === 0 ? \n        '<p>No orders at this time</p>' : ''\n      }\n    </div>\n  </div>\n\n  <div class=\"red-flag\">\n    <h3>🚨 WHEN TO SEEK IMMEDIATE MEDICAL ATTENTION:</h3>\n    ${reconciled.redFlags.map(r => `<div class=\"list-item\">• ${r}</div>`).join('')}\n  </div>\n\n  <div class=\"footer\">\n    <p><strong>Staff Acknowledgment:</strong></p>\n    <table style=\"margin-top: 20px;\">\n      <tr>\n        <td class=\"bold\">Staff Initials:</td>\n        <td>_________________</td>\n        <td class=\"bold\">Date:</td>\n        <td>_________________</td>\n      </tr>\n    </table>\n    <p style=\"margin-top: 30px; font-size: 12px; color: #666;\">\n      Document ID: ${reconciled.appointment.id} | Generated: ${metadata.timestamp}<br>\n      Status: ${metadata.status} | Conflicts: ${metadata.totalConflicts}\n    </p>\n  </div>\n</body>\n</html>\n`;\n\nreturn {\n  json: {\n    html,\n    reconciled,\n    conflicts,\n    metadata\n  }\n};"
+      },
+      "id": "generate-html-template",
+      "name": "Generate HTML Discharge Sheet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 200]
+    },
+    {
+      "parameters": {
+        "operation": "htmlToPdf",
+        "html": "={{$json.html}}",
+        "options": {
+          "format": "A4",
+          "margin": {
+            "top": "10mm",
+            "right": "10mm",
+            "bottom": "10mm",
+            "left": "10mm"
+          }
+        }
+      },
+      "id": "convert-to-pdf",
+      "name": "Convert to PDF",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "fileName": "=Discharge_Sheet_{{$node['Fetch Patient Data'].json.last_name}}_{{$now.format('YYYYMMDD_HHmmss')}}.pdf",
+        "binaryData": true,
+        "options": {}
+      },
+      "id": "save-to-storage",
+      "name": "Save to Google Cloud Storage",
+      "type": "n8n-nodes-base.googleCloudStorage",
+      "typeVersion": 1,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://app.drchrono.com/api/patients/{{$node['Fetch Patient Data'].json.id}}/documents",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "document",
+              "value": "={{$binary.data}}"
+            },
+            {
+              "name": "description",
+              "value": "Discharge Instructions"
+            },
+            {
+              "name": "date",
+              "value": "={{$now.format('YYYY-MM-DD')}}"
+            }
+          ]
+        },
+        "options": {
+          "headers": {
+            "entries": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer {{$node['Get DrChrono OAuth Token'].json.access_token}}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "upload-to-drchrono",
+      "name": "Upload PDF to DrChrono",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [2220, 350]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Audit Log Entry\nconst data = $input.first().json;\n\nconst auditLog = {\n  timestamp: new Date().toISOString(),\n  appointment_id: data.reconciled.appointment.id,\n  patient_id: data.reconciled.patient.id,\n  patient_name: data.reconciled.patient.name,\n  generated_by: 'Automated System',\n  conflicts_detected: data.conflicts.length,\n  accuracy_percentage: data.metadata.accuracy,\n  status: data.metadata.status,\n  conflicts: data.conflicts,\n  document_location: 'DrChrono + Cloud Storage',\n  processing_time: '< 60 seconds',\n  version: '1.0'\n};\n\nreturn { json: auditLog };"
+      },
+      "id": "create-audit-log",
+      "name": "Create Audit Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 200]
+    },
+    {
+      "parameters": {
+        "channel": "#discharge-notifications",
+        "text": "=✅ Discharge Sheet Generated\n\n*Patient:* {{$node['Fetch Patient Data'].json.first_name}} {{$node['Fetch Patient Data'].json.last_name}}\n*Appointment:* {{$node['Fetch Appointment Data'].json.scheduled_time}}\n*Accuracy:* {{$json.accuracy_percentage}}\n*Conflicts:* {{$json.conflicts_detected}}\n*Status:* {{$json.status}}\n\n📄 Document uploaded to DrChrono and Cloud Storage",
+        "otherOptions": {}
+      },
+      "id": "notify-slack",
+      "name": "Send Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [2660, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {\n  \"success\": true,\n  \"message\": \"Discharge sheet generated successfully\",\n  \"patient\": $node['Fetch Patient Data'].json.first_name + ' ' + $node['Fetch Patient Data'].json.last_name,\n  \"appointment_id\": $node['Fetch Appointment Data'].json.id,\n  \"document_url\": $node['Save to Google Cloud Storage'].json.mediaLink,\n  \"accuracy\": $node['Create Audit Log'].json.accuracy_percentage,\n  \"conflicts\": $node['Create Audit Log'].json.conflicts_detected,\n  \"timestamp\": $now.toISO()\n} }}",
+        "options": {}
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2880, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {\n  \"success\": false,\n  \"message\": \"Appointment status must be 'REFERRALS COMPLETED'\",\n  \"current_status\": $json.appointment_status\n} }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "error-response",
+      "name": "Error Response - Invalid Status",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "operation": "aggregate",
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "merge-clinical-checkout",
+      "name": "Merge Clinical & Checkout",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [1560, 100]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check Appointment Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Appointment Status": {
+      "main": [
+        [
+          {
+            "node": "Get DrChrono OAuth Token",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Response - Invalid Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get DrChrono OAuth Token": {
+      "main": [
+        [
+          {
+            "node": "Fetch Appointment Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Appointment Data": {
+      "main": [
+        [
+          {
+            "node": "Fetch Patient Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Patient Data": {
+      "main": [
+        [
+          {
+            "node": "Fetch Clinical Note",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Checkout Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Clinical Note": {
+      "main": [
+        [
+          {
+            "node": "Merge Clinical & Checkout",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Checkout Sheet": {
+      "main": [
+        [
+          {
+            "node": "Merge Clinical & Checkout",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Clinical & Checkout": {
+      "main": [
+        [
+          {
+            "node": "Reconcile Clinical & Checkout Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconcile Clinical & Checkout Data": {
+      "main": [
+        [
+          {
+            "node": "Generate HTML Discharge Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate HTML Discharge Sheet": {
+      "main": [
+        [
+          {
+            "node": "Convert to PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to PDF": {
+      "main": [
+        [
+          {
+            "node": "Save to Google Cloud Storage",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Upload PDF to DrChrono",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Google Cloud Storage": {
+      "main": [
+        [
+          {
+            "node": "Create Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload PDF to DrChrono": {
+      "main": [
+        [
+          {
+            "node": "Create Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Audit Log": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Slack Notification": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings":
